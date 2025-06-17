@@ -122,12 +122,42 @@ print_step "Running setup script..."
 }
 print_success "Setup script executed"
 
-print_step "Loading Rust environment..."
-if [[ -f "$HOME/.cargo/env" ]]; then
-    source "$HOME/.cargo/env"
-    print_success "Rust environment loaded"
+print_step "Installing Rust..."
+if command -v rustc &> /dev/null && command -v cargo &> /dev/null; then
+    print_success "Rust is already installed"
 else
-    print_error "Failed to load Rust environment"
+    print_info "Installing Rust programming language..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || {
+        print_error "Failed to install Rust. Trying alternate method..."
+        apt install -y rustc cargo || {
+            print_error "Failed to install Rust via apt. Press Enter to exit..."
+            read
+            exit 1
+        }
+    }
+    
+    # Source rust environment after installation
+    if [[ -f "$HOME/.cargo/env" ]]; then
+        source "$HOME/.cargo/env"
+        print_success "Rust installed successfully."
+    else
+        print_error "Rust installation failed. ~/.cargo/env not found. Press Enter to exit..."
+        read
+        exit 1
+    fi
+fi
+
+# Make sure rust binaries are in PATH
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# Verify rust installation
+if command -v rustc &> /dev/null && command -v cargo &> /dev/null; then
+    print_info "Rust version: $(rustc --version)"
+    print_info "Cargo version: $(cargo --version)"
+else
+    print_error "Rust verification failed. Installation might have issues. Press Enter to exit..."
+    read
+    exit 1
 fi
 
 print_step "Installing Risc Zero..."
@@ -185,24 +215,39 @@ fi
 print_step "Installing additional tools..."
 
 if ! command -v cargo &> /dev/null; then
-    print_error "Cargo not found. Please install Rust manually and try again."
+    print_error "Cargo not found after installation attempts. Press Enter to exit..."
+    read
     exit 1
 fi
 
 echo "Installing bento-client..."
-cargo install --git https://github.com/risc0/risc0 bento-client --bin bento_cli
+cargo install --git https://github.com/risc0/risc0 bento-client --bin bento_cli || {
+    print_error "Failed to install bento-client. Press Enter to continue anyway..."
+    read
+}
 
 if command -v just &> /dev/null; then
     echo "Running just bento..."
-    just bento
+    just bento || print_warning "just bento command failed, continuing anyway"
 else
     print_warning "just command not found, installing..."
-    curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
-    just bento
+    curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin || {
+        print_warning "Failed to install just, continuing anyway"
+    }
+    
+    if command -v just &> /dev/null; then
+        just bento || print_warning "just bento command failed, continuing anyway"
+    else
+        print_warning "just command still not available, continuing anyway"
+    fi
 fi
 
 echo "Installing boundless-cli..."
-cargo install --locked boundless-cli
+cargo install --locked boundless-cli || {
+    print_error "Failed to install boundless-cli. This is critical. Press Enter to exit..."
+    read
+    exit 1
+}
 
 print_success "Additional tools installed"
 

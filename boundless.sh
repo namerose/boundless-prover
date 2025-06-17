@@ -1,12 +1,11 @@
 #!/bin/bash
 
+# Color definitions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+NC='\033[0m' # No Color
 
 print_step() {
     echo -e "${BLUE}[STEP]${NC} $1"
@@ -24,36 +23,141 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-print_info() {
-    echo -e "${CYAN}[INFO]${NC} $1"
-}
+# Check if running as root
+if [ "$(id -u)" != "0" ]; then
+    print_error "This script must be run as root. Please use 'su -' or login as root."
+    exit 1
+fi
 
-update_env_var() {
-    local file="$1"
-    local var="$2"
-    local value="$3"
+print_step "Installing basic dependencies (apt, curl, git)..."
+apt update
+apt install -y sudo git curl
+print_success "Basic dependencies installed"
+
+print_step "Cloning Boundless repository..."
+git clone https://github.com/boundless-xyz/boundless
+cd boundless
+git checkout release-0.10
+print_success "Repository cloned and checked out to release-0.10"
+
+print_step "Replacing setup script..."
+rm -f scripts/setup.sh
+curl -o scripts/setup.sh https://raw.githubusercontent.com/zunxbt/boundless-prover/refs/heads/main/script.sh
+chmod +x scripts/setup.sh
+print_success "Setup script replaced"
+
+print_step "Running setup script..."
+./scripts/setup.sh
+print_success "Setup script executed"
+
+print_step "Loading Rust environment..."
+if [[ -f "$HOME/.cargo/env" ]]; then
+    source "$HOME/.cargo/env"
+    print_success "Rust environment loaded"
+else
+    print_error "Failed to load Rust environment"
+fi
+
+print_step "Installing Risc Zero..."
+curl -L https://risczero.com/install | bash
+
+export PATH="$HOME/.risc0/bin:$PATH"
+echo "Added $HOME/.risc0/bin to PATH"
+
+if [[ -d "$HOME/.rzup/bin" ]]; then
+    export PATH="$HOME/.rzup/bin:$PATH"
+    echo "Added $HOME/.rzup/bin to PATH"
+fi
+
+if [[ -f "$HOME/.bashrc" ]]; then
+    source "$HOME/.bashrc"
+fi
+
+if [[ -f "$HOME/.rzup/env" ]]; then
+    source "$HOME/.rzup/env"
+    echo "Sourced rzup environment from $HOME/.rzup/env"
+fi
+
+if [[ -f "/root/.risc0/env" ]]; then
+    source "/root/.risc0/env"
+    echo "Sourced rzup environment from /root/.risc0/env"
+fi
+
+if command -v rzup &> /dev/null; then
+    echo "rzup found, installing Rust toolchain..."
+    rzup install rust
+    echo "Updating r0vm..."
+    rzup update r0vm
+    print_success "Risc Zero installed successfully"
+else
+    echo "rzup not found. Checking available paths..."
+    echo "Current PATH: $PATH"
+    echo "Contents of /root/.risc0/bin:"
+    ls -la /root/.risc0/bin/ 2>/dev/null || echo "Directory not found"
     
-    if grep -q "^${var}=" "$file"; then
-        sed -i "s|^${var}=.*|${var}=${value}|" "$file"
+    if [[ -x "/root/.risc0/bin/rzup" ]]; then
+        echo "Found rzup binary, executing directly..."
+        /root/.risc0/bin/rzup install rust
+        /root/.risc0/bin/rzup update r0vm
+        print_success "Risc Zero installed successfully using direct path"
     else
-        echo "${var}=${value}" >> "$file"
+        print_error "rzup binary not found or not executable"
     fi
-}
+fi
 
+# Make sure rust environment is sourced
+if [[ -f "$HOME/.cargo/env" ]]; then
+    source "$HOME/.cargo/env"
+fi
+
+print_step "Installing additional tools..."
+
+if ! command -v cargo &> /dev/null; then
+    print_error "Cargo not found. Please install Rust manually and try again."
+    exit 1
+fi
+
+echo "Installing bento-client..."
+cargo install --git https://github.com/risc0/risc0 bento-client --bin bento_cli
+
+if command -v just &> /dev/null; then
+    echo "Running just bento..."
+    just bento
+else
+    print_warning "just command not found, installing..."
+    curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+    just bento
+fi
+
+echo "Installing boundless-cli..."
+cargo install --locked boundless-cli
+
+print_success "Additional tools installed"
+
+print_step "Checking GPU configuration..."
+gpu_count=0
+if command -v nvidia-smi &> /dev/null; then
+    gpu_count=$(nvidia-smi -L 2>/dev/null | wc -l)
+fi
+echo "Found $gpu_count GPU(s)"
+
+cd boundless
+
+# Modify compose for multiple GPUs function included from the original script
 modify_compose_for_multiple_gpus() {
     local gpu_count="$1"
     
     if [ $gpu_count -le 1 ]; then
-        print_info "Single GPU detected, no compose.yml modification needed"
+        echo "Single GPU detected, no compose.yml modification needed"
         return 0
     fi
     
     print_step "Configuring compose.yml for $gpu_count GPUs..."
     
     cp compose.yml compose.yml.backup
-    print_info "Created backup: compose.yml.backup"
+    echo "Created backup: compose.yml.backup"
     
-    print_info "Adding GPU agents for GPUs 1-$((gpu_count-1))..."
+    echo "Adding GPU agents for GPUs 1-$((gpu_count-1))..."
     
     local gpu_agent_end_line
     gpu_agent_end_line=$(grep -n "capabilities: \[gpu\]" compose.yml | head -1 | cut -d: -f1)
@@ -63,7 +167,7 @@ modify_compose_for_multiple_gpus() {
         return 1
     fi
     
-    print_info "Found gpu_prove_agent0 end at line $gpu_agent_end_line"
+    echo "Found gpu_prove_agent0 end at line $gpu_agent_end_line"
     
     local additional_agents=""
     for ((i=1; i<gpu_count; i++)); do
@@ -93,7 +197,7 @@ modify_compose_for_multiple_gpus() {
     
     print_success "Added GPU agents for GPUs 1-$((gpu_count-1))"
     
-    print_info "Updating broker dependencies..."
+    echo "Updating broker dependencies..."
     
     local broker_start_line
     local depends_on_line
@@ -112,7 +216,7 @@ modify_compose_for_multiple_gpus() {
     fi
     
     depends_on_line=$((broker_start_line + depends_on_line - 1))
-    print_info "Found broker depends_on at line $depends_on_line"
+    echo "Found broker depends_on at line $depends_on_line"
     
     depends_on_end_line=$depends_on_line
     while read -r line; do
@@ -130,7 +234,7 @@ modify_compose_for_multiple_gpus() {
         fi
     done < <(tail -n +$((depends_on_line + 1)) compose.yml)
     
-    print_info "Dependencies section ends at line $depends_on_end_line"
+    echo "Dependencies section ends at line $depends_on_end_line"
     
     local new_dependencies="    depends_on:
       - rest_api"
@@ -155,204 +259,48 @@ modify_compose_for_multiple_gpus() {
     } > compose.yml.tmp && mv compose.yml.tmp compose.yml
     
     print_success "Updated broker dependencies to include all $gpu_count GPU agents"
-    
-    print_info "Verifying compose.yml modifications..."
-    local gpu_agents_count
-    gpu_agents_count=$(grep -c "gpu_prove_agent[0-9]*:" compose.yml || true)
-    
-    if [[ "$gpu_agents_count" -eq "$gpu_count" ]]; then
-        print_success "✓ Found $gpu_agents_count GPU agents in compose.yml"
-    else
-        print_warning "⚠ Expected $gpu_count GPU agents, found $gpu_agents_count"
-    fi
-    
-    local missing_deps=()
-    for ((i=0; i<gpu_count; i++)); do
-        if ! grep -A 20 "broker:" compose.yml | grep -q "gpu_prove_agent$i"; then
-            missing_deps+=("gpu_prove_agent$i")
-        fi
-    done
-    
-    if [[ ${#missing_deps[@]} -eq 0 ]]; then
-        print_success "✓ All GPU agents are included in broker dependencies"
-    else
-        print_warning "⚠ Missing GPU agents in broker dependencies: ${missing_deps[*]}"
-    fi
-    
     print_success "Multi-GPU configuration completed successfully"
-    print_info "Configured for $gpu_count GPUs: gpu_prove_agent0 through gpu_prove_agent$((gpu_count-1))"
 }
-
-source_rust_env() {
-    print_info "Sourcing Rust environment..."
-    
-    if [[ -f "$HOME/.cargo/env" ]]; then
-        source "$HOME/.cargo/env"
-        print_info "Sourced Rust environment from $HOME/.cargo/env"
-    fi
-    
-    if [[ -n "${SUDO_USER:-}" ]] && [[ "$SUDO_USER" != "root" ]]; then
-        local user_home="/home/$SUDO_USER"
-        if [[ -f "$user_home/.cargo/env" ]]; then
-            source "$user_home/.cargo/env"
-            print_info "Sourced Rust environment from $user_home/.cargo/env"
-        fi
-    fi
-    
-    if [[ -d "$HOME/.cargo/bin" ]]; then
-        export PATH="$HOME/.cargo/bin:$PATH"
-        print_info "Added $HOME/.cargo/bin to PATH"
-    fi
-    
-    if [[ -n "${SUDO_USER:-}" ]] && [[ "$SUDO_USER" != "root" ]]; then
-        local user_home="/home/$SUDO_USER"
-        if [[ -d "$user_home/.cargo/bin" ]]; then
-            export PATH="$user_home/.cargo/bin:$PATH"
-            print_info "Added $user_home/.cargo/bin to PATH"
-        fi
-    fi
-    
-    if command -v rustc &> /dev/null && command -v cargo &> /dev/null; then
-        print_success "Rust environment successfully loaded"
-        print_info "Rust version: $(rustc --version)"
-        print_info "Cargo version: $(cargo --version)"
-    else
-        print_error "Failed to load Rust environment"
-        return 1
-    fi
-}
-
-print_step "Updating system and installing dependencies..."
-sudo apt update && sudo apt install -y sudo git curl
-print_success "Dependencies installed"
-
-print_step "Cloning Boundless repository..."
-git clone https://github.com/boundless-xyz/boundless
-cd boundless
-git checkout release-0.10
-print_success "Repository cloned and checked out to release-0.10"
-
-print_step "Replacing setup script..."
-rm scripts/setup.sh
-curl -o scripts/setup.sh https://raw.githubusercontent.com/zunxbt/boundless-prover/refs/heads/main/script.sh
-chmod +x scripts/setup.sh
-print_success "Setup script replaced"
-
-print_step "Running setup script..."
-sudo ./scripts/setup.sh
-print_success "Setup script executed"
-
-print_step "Loading Rust environment..."
-source_rust_env
-
-print_step "Installing Risc Zero..."
-
-curl -L https://risczero.com/install | bash
-
-export PATH="/root/.risc0/bin:$PATH"
-print_info "Added /root/.risc0/bin to PATH"
-
-if [[ -d "$HOME/.rzup/bin" ]]; then
-    export PATH="$HOME/.rzup/bin:$PATH"
-    print_info "Added $HOME/.rzup/bin to PATH"
-fi
-
-source "$HOME/.bashrc"
-
-if [[ -f "$HOME/.rzup/env" ]]; then
-    source "$HOME/.rzup/env"
-    print_info "Sourced rzup environment from $HOME/.rzup/env"
-fi
-
-if [[ -f "/root/.risc0/env" ]]; then
-    source "/root/.risc0/env"
-    print_info "Sourced rzup environment from /root/.risc0/env"
-fi
-
-if command -v rzup &> /dev/null; then
-    print_info "rzup found, installing Rust toolchain..."
-    rzup install rust
-    print_info "Updating r0vm..."
-    rzup update r0vm
-    print_success "Risc Zero installed successfully"
-else
-    print_error "rzup still not found. Checking available paths..."
-    print_info "Current PATH: $PATH"
-    print_info "Contents of /root/.risc0/bin:"
-    ls -la /root/.risc0/bin/ 2>/dev/null || print_info "Directory not found"
-    
-    if [[ -x "/root/.risc0/bin/rzup" ]]; then
-        print_info "Found rzup binary, executing directly..."
-        /root/.risc0/bin/rzup install rust
-        /root/.risc0/bin/rzup update r0vm
-        print_success "Risc Zero installed successfully using direct path"
-    else
-        print_error "rzup binary not found or not executable"
-    fi
-fi
-
-source_rust_env
-
-print_step "Installing additional tools..."
-
-if ! command -v cargo &> /dev/null; then
-    print_error "Cargo not found. Re-attempting to source Rust environment..."
-    source_rust_env
-fi
-
-if command -v cargo &> /dev/null; then
-    print_info "Installing bento-client..."
-    cargo install --git https://github.com/risc0/risc0 bento-client --bin bento_cli
-    
-    print_info "Running just bento..."
-    if command -v just &> /dev/null; then
-        just bento
-    else
-        print_warning "just command not found, skipping 'just bento'"
-    fi
-    
-    print_info "Installing boundless-cli..."
-    cargo install --locked boundless-cli
-    
-    print_success "Additional tools installed"
-else
-    print_error "Cargo still not available. Please check Rust installation."
-    exit 1
-fi
-
-print_step "Checking GPU configuration..."
-gpu_count=0
-if command -v nvidia-smi &> /dev/null; then
-    gpu_count=$(nvidia-smi -L 2>/dev/null | wc -l)
-fi
-print_info "Found $gpu_count GPU(s)"
 
 modify_compose_for_multiple_gpus $gpu_count
 
 print_step "Network Selection"
-echo -e "${PURPLE}Choose networks to run the prover on:${NC}"
+echo -e "${YELLOW}Choose networks to run the prover on:${NC}"
 echo "1. Base Mainnet"
 echo "2. Base Sepolia"
 echo "3. Ethereum Sepolia"
 echo ""
 read -p "Enter your choices (e.g., 1,2,3 for all): " network_choice
 
+# Function to update environment variables
+update_env_var() {
+    local file="$1"
+    local var="$2"
+    local value="$3"
+    
+    if grep -q "^${var}=" "$file"; then
+        sed -i "s|^${var}=.*|${var}=${value}|" "$file"
+    else
+        echo "${var}=${value}" >> "$file"
+    fi
+}
+
 if [[ $network_choice == *"1"* ]]; then
     cp .env.broker-template .env.broker.base
     cp .env.base .env.base.backup
-    print_info "Created Base Mainnet environment files"
+    echo "Created Base Mainnet environment files"
 fi
 
 if [[ $network_choice == *"2"* ]]; then
     cp .env.broker-template .env.broker.base-sepolia
     cp .env.base-sepolia .env.base-sepolia.backup
-    print_info "Created Base Sepolia environment files"
+    echo "Created Base Sepolia environment files"
 fi
 
 if [[ $network_choice == *"3"* ]]; then
     cp .env.broker-template .env.broker.eth-sepolia
     cp .env.eth-sepolia .env.eth-sepolia.backup
-    print_info "Created Ethereum Sepolia environment files"
+    echo "Created Ethereum Sepolia environment files"
 fi
 
 read -p "Enter your private key: " private_key
@@ -427,7 +375,7 @@ print_success "Broker settings configured for $gpu_count GPU(s)"
 print_step "Depositing stake for selected networks..."
 
 if [[ $network_choice == *"1"* ]]; then
-    print_info "Depositing stake on Base Mainnet..."
+    echo "Depositing stake on Base Mainnet..."
     boundless \
         --rpc-url $base_rpc \
         --private-key $private_key \
@@ -439,7 +387,7 @@ if [[ $network_choice == *"1"* ]]; then
 fi
 
 if [[ $network_choice == *"2"* ]]; then
-    print_info "Depositing stake on Base Sepolia..."
+    echo "Depositing stake on Base Sepolia..."
     boundless \
         --rpc-url $base_sepolia_rpc \
         --private-key $private_key \
@@ -451,7 +399,7 @@ if [[ $network_choice == *"2"* ]]; then
 fi
 
 if [[ $network_choice == *"3"* ]]; then
-    print_info "Depositing stake on Ethereum Sepolia..."
+    echo "Depositing stake on Ethereum Sepolia..."
     boundless \
         --rpc-url $eth_sepolia_rpc \
         --private-key $private_key \
@@ -483,43 +431,25 @@ print_step "Setting up environment for future sessions..."
     echo "fi"
 } >> ~/.bashrc
 
-if [[ -n "${SUDO_USER:-}" ]] && [[ "$SUDO_USER" != "root" ]]; then
-    user_home="/home/$SUDO_USER"
-    {
-        echo ""
-        echo "# Rust environment"
-        echo "if [ -f \"\$HOME/.cargo/env\" ]; then"
-        echo "    source \"\$HOME/.cargo/env\""
-        echo "fi"
-        echo ""
-        echo "# RISC Zero environment"
-        echo "export PATH=\"/root/.risc0/bin:\$PATH\""
-        echo "if [ -f \"\$HOME/.rzup/env\" ]; then"
-        echo "    source \"\$HOME/.rzup/env\""
-        echo "fi"
-        echo "if [ -f \"/root/.risc0/env\" ]; then"
-            echo "    source \"/root/.risc0/env\""
-        echo "fi"
-    } | sudo -u "$SUDO_USER" tee -a "$user_home/.bashrc" > /dev/null
-fi
-
 print_success "Environment configured for future sessions"
 
 print_step "Starting brokers..."
 
 if [[ $network_choice == *"1"* ]]; then
-    print_info "Starting Base Mainnet broker..."
+    echo "Starting Base Mainnet broker..."
     just broker up ./.env.broker.base
 fi
 
 if [[ $network_choice == *"2"* ]]; then
-    print_info "Starting Base Sepolia broker..."
+    echo "Starting Base Sepolia broker..."
     just broker up ./.env.broker.base-sepolia
 fi
 
 if [[ $network_choice == *"3"* ]]; then
-    print_info "Starting Ethereum Sepolia broker..."
+    echo "Starting Ethereum Sepolia broker..."
     just broker up ./.env.broker.eth-sepolia
 fi
 
 print_success "Setup completed successfully!"
+print_success "To check logs, use: docker compose logs -f broker"
+print_success "Follow the instructions in the README.md for additional commands and operations."

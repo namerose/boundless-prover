@@ -7,6 +7,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Add error handling to prevent terminal from closing unexpectedly
+set -euo pipefail
+trap 'echo -e "${RED}[ERROR]${NC} Command failed at line $LINENO with exit code $?. Press Enter to continue..."; read' ERR
+trap 'echo -e "\n${BLUE}[INFO]${NC} Script execution interrupted. Press Enter to exit..."; read' INT TERM
+
 print_step() {
     echo -e "${BLUE}[STEP]${NC} $1"
 }
@@ -26,28 +31,95 @@ print_error() {
 # Check if running as root
 if [ "$(id -u)" != "0" ]; then
     print_error "This script must be run as root. Please use 'su -' or login as root."
+    echo "Press Enter to exit..."
+    read
     exit 1
 fi
 
 print_step "Installing basic dependencies (apt, curl, git)..."
-apt update
-apt install -y sudo git curl
+apt update || { 
+    print_error "Failed to run 'apt update'. Do you have internet connectivity?"
+    echo "Press Enter to exit..."
+    read
+    exit 1
+}
+
+apt install -y sudo git curl || {
+    print_error "Failed to install basic packages. Do you have proper permissions?"
+    echo "Press Enter to exit..."
+    read
+    exit 1
+}
+
+# Verify installation
+if ! command -v git &> /dev/null || ! command -v curl &> /dev/null; then
+    print_error "Failed to install git or curl. Please check system requirements."
+    echo "Press Enter to exit..."
+    read
+    exit 1
+fi
+
 print_success "Basic dependencies installed"
 
 print_step "Cloning Boundless repository..."
-git clone https://github.com/boundless-xyz/boundless
-cd boundless
-git checkout release-0.10
+git clone https://github.com/boundless-xyz/boundless || {
+    print_error "Failed to clone the repository. Check your internet connection."
+    echo "Press Enter to exit..."
+    read
+    exit 1
+}
+
+cd boundless || {
+    print_error "Failed to enter boundless directory."
+    echo "Press Enter to exit..."
+    read
+    exit 1
+}
+
+git checkout release-0.10 || {
+    print_error "Failed to checkout release-0.10 branch."
+    echo "Press Enter to exit..."
+    read
+    exit 1
+}
+
 print_success "Repository cloned and checked out to release-0.10"
 
 print_step "Replacing setup script..."
+# First ensure the scripts directory exists
+if [ ! -d "scripts" ]; then
+    mkdir -p scripts || {
+        print_error "Failed to create scripts directory."
+        echo "Press Enter to exit..."
+        read
+        exit 1
+    }
+fi
+
 rm -f scripts/setup.sh
-curl -o scripts/setup.sh https://raw.githubusercontent.com/zunxbt/boundless-prover/refs/heads/main/script.sh
-chmod +x scripts/setup.sh
+curl -o scripts/setup.sh https://raw.githubusercontent.com/zunxbt/boundless-prover/refs/heads/main/script.sh || {
+    print_error "Failed to download setup script."
+    echo "Press Enter to exit..."
+    read
+    exit 1
+}
+
+chmod +x scripts/setup.sh || {
+    print_error "Failed to make setup script executable."
+    echo "Press Enter to exit..."
+    read
+    exit 1
+}
+
 print_success "Setup script replaced"
 
 print_step "Running setup script..."
-./scripts/setup.sh
+./scripts/setup.sh || {
+    print_error "Setup script failed. Check the error messages above."
+    echo "Press Enter to exit..."
+    read
+    exit 1
+}
 print_success "Setup script executed"
 
 print_step "Loading Rust environment..."
@@ -453,3 +525,7 @@ fi
 print_success "Setup completed successfully!"
 print_success "To check logs, use: docker compose logs -f broker"
 print_success "Follow the instructions in the README.md for additional commands and operations."
+
+# Keep terminal open at the end of the script
+echo -e "\n${GREEN}[INFO]${NC} Installation process complete. Press Enter to exit..."
+read
